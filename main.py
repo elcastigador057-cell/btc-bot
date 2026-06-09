@@ -182,10 +182,10 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
     # Este es el filtro mas importante: solo buscamos compra
     # cuando el precio lleva un rato bajando (posible suelo)
     # y solo buscamos venta cuando lleva subiendo (posible techo)
-    if v30 < -50:
+    if v30 < -30:
         score_c += 30
         razones_c.append(f"Lleva bajando {v30:+.0f} pts en 30m — posible suelo")
-    elif v30 > 50:
+    elif v30 > 30:
         score_v += 30
         razones_v.append(f"Lleva subiendo {v30:+.0f} pts en 30m — posible techo")
     else:
@@ -195,10 +195,10 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
     # ── CAMBIO DE DIRECCION en 5 min ──
     # Para compra: v30 negativo pero v5 ya positivo (giro al alza)
     # Para venta:  v30 positivo pero v5 ya negativo (giro a la baja)
-    if v5 > 20:
+    if v5 > 10:
         score_c += 25
         razones_c.append(f"Giro alcista en 5m: +{v5:.0f} pts")
-    elif v5 < -20:
+    elif v5 < -10:
         score_v += 25
         razones_v.append(f"Giro bajista en 5m: {v5:.0f} pts")
     else:
@@ -249,7 +249,7 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
     coherente_compra = v30 < 0 and v5 > 0
     coherente_venta  = v30 > 0 and v5 < 0
 
-    if coherente_compra and score_c >= 70 and (rsi_v is None or rsi_v < 70):
+    if coherente_compra and score_c >= 65 and (rsi_v is None or rsi_v < 70):
         sl_base = max(80, round(abs(v5) * 1.5, 0))
         rr      = 2.0 if score_c >= 80 else 1.5
         entrada = round(precio + 5, 0)
@@ -257,7 +257,7 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
         tp      = round(entrada + sl_base * rr, 0)
         return "compra", score_c, razones_c, sl, tp, rr
 
-    if coherente_venta and score_v >= 70 and (rsi_v is None or rsi_v > 30):
+    if coherente_venta and score_v >= 65 and (rsi_v is None or rsi_v > 30):
         sl_base = max(80, round(abs(v5) * 1.5, 0))
         rr      = 2.0 if score_v >= 80 else 1.5
         entrada = round(precio - 5, 0)
@@ -378,10 +378,10 @@ def evaluar(precio):
                               v5 or 0, v30 or 0, rsi_v))
         return
 
-    # ── 4. Resumen horario (solo informativo, no señal) ──
+    # ── 4. Resumen horario cada 1 hora (solo informativo) ──
     if not peek_cooldown("resumen"):
         en_cooldown("resumen")
-        telegram(msg_resumen(precio, dir, score, v5 or 0, v30 or 0, rsi_v, len(ps)))
+        telegram(msg_resumen(precio, dir, score, v5, v30, rsi_v, len(ps)))
 
 # ══════════════════════════════════════════════════════════
 # LOOP PRINCIPAL
