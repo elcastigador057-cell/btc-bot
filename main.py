@@ -14,7 +14,7 @@ from datetime import datetime
 # ══════════════════════════════════════════════════════════
 # CONFIGURACION
 # ══════════════════════════════════════════════════════════
-TOKEN     = os.environ.get("TELEGRAM_TOKEN", "8804236118:AAEsOWK0sk8ZAcUTXAD8ZYWiMm5OGPn07Xs")
+TOKEN     = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_IDS  = [c.strip() for c in os.environ.get("CHAT_ID", "1842727203,5545360383").split(",") if c.strip()]
 INTERVALO = 5       # segundos entre ticks
 HIST_MAX  = 720     # 720 x 5s = 60 minutos de historial
@@ -79,9 +79,22 @@ def telegram(msg):
             log(f"TG excepcion -> {cid}: {e}")
 
 # ══════════════════════════════════════════════════════════
-# FETCH PRECIO — Binance gratis
+# FETCH PRECIO — CoinGecko principal, Binance como fallback
 # ══════════════════════════════════════════════════════════
 def get_precio():
+    # Fuente 1: CoinGecko (sin restricciones geograficas)
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+            timeout=10
+        )
+        data = r.json()
+        precio = float(data["bitcoin"]["usd"])
+        return precio
+    except Exception as e:
+        log(f"CoinGecko error ({type(e).__name__}): {e} — intentando Binance...")
+
+    # Fuente 2: Binance como fallback
     try:
         r = requests.get(
             "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
@@ -90,9 +103,10 @@ def get_precio():
         data = r.json()
         if "price" in data:
             return float(data["price"])
+        log(f"Binance respuesta inesperada: {data}")
         return None
     except Exception as e:
-        log(f"Binance error: {e}")
+        log(f"Binance error ({type(e).__name__}): {e}")
         return None
 
 def registrar(precio):
@@ -419,7 +433,7 @@ def main():
             log("Bot detenido.")
             break
         except Exception as e:
-            log(f"Error inesperado: {e}")
+            log(f"Error inesperado ({type(e).__name__}): {e}")
             time.sleep(30)
 
 if __name__ == "__main__":
