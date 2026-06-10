@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════╗
-║       CODIGO DE ORO — Bot BTC/USD v2.0 para Railway     ║
+║       CODIGO DE ORO — Bot BTC/USD v3.0 para Railway     ║
 ║  Filosofia: pocas alertas, todas de calidad             ║
 ║  Solo avisa cuando hay contexto claro de entrada        ║
 ╚══════════════════════════════════════════════════════════╝
@@ -14,7 +14,7 @@ from datetime import datetime
 # ══════════════════════════════════════════════════════════
 # CONFIGURACION
 # ══════════════════════════════════════════════════════════
-TOKEN     = os.environ.get("TELEGRAM_TOKEN", "")
+TOKEN     = os.environ.get("TELEGRAM_TOKEN", "8804236118:AAEsOWK0sk8ZAcUTXAD8ZYWiMm5OGPn07Xs")
 CHAT_IDS  = [c.strip() for c in os.environ.get("CHAT_ID", "1842727203,5545360383").split(",") if c.strip()]
 INTERVALO = 5       # segundos entre ticks
 HIST_MAX  = 720     # 720 x 5s = 60 minutos de historial
@@ -23,6 +23,7 @@ HIST_MAX  = 720     # 720 x 5s = 60 minutos de historial
 CD = {
     "entrada_compra":  1800,   # 30 min entre señales de compra
     "entrada_venta":   1800,   # 30 min entre señales de venta
+    "retroceso_baj":    900,   # 15 min entre alertas de retroceso
     "soporte_roto":     600,   # 10 min
     "rebote_soporte":   600,
     "resumen":         3600,   # resumen cada 1 hora (solo informativo)
@@ -79,22 +80,9 @@ def telegram(msg):
             log(f"TG excepcion -> {cid}: {e}")
 
 # ══════════════════════════════════════════════════════════
-# FETCH PRECIO — CoinGecko principal, Binance como fallback
+# FETCH PRECIO — Binance gratis
 # ══════════════════════════════════════════════════════════
 def get_precio():
-    # Fuente 1: CoinGecko (sin restricciones geograficas)
-    try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            timeout=10
-        )
-        data = r.json()
-        precio = float(data["bitcoin"]["usd"])
-        return precio
-    except Exception as e:
-        log(f"CoinGecko error ({type(e).__name__}): {e} — intentando Binance...")
-
-    # Fuente 2: Binance como fallback
     try:
         r = requests.get(
             "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
@@ -103,10 +91,9 @@ def get_precio():
         data = r.json()
         if "price" in data:
             return float(data["price"])
-        log(f"Binance respuesta inesperada: {data}")
         return None
     except Exception as e:
-        log(f"Binance error ({type(e).__name__}): {e}")
+        log(f"Binance error: {e}")
         return None
 
 def registrar(precio):
@@ -212,7 +199,7 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
     if v5 > 10:
         score_c += 25
         razones_c.append(f"Giro alcista en 5m: +{v5:.0f} pts")
-    elif v5 < -10:
+    elif v5 < -8:  # CAMBIO v3: mas sensible para detectar giros bajistas
         score_v += 25
         razones_v.append(f"Giro bajista en 5m: {v5:.0f} pts")
     else:
@@ -313,6 +300,22 @@ def msg_entrada(dir, precio, score, razones, sl, tp, rr, v5, v30, rsi_v):
         f"⏰ {hora_txt()} — Revisar vela actual antes de entrar"
     )
 
+def msg_retroceso_bajista(precio, v5, v30, rsi_v):
+    """Alerta intermedia: aviso de correccion, no señal de venta."""
+    return (
+        f"🔶 <b>POSIBLE RETROCESO — BTC/USD</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Precio: <b>${precio:,.0f}</b>\n"
+        f"⏱ 5m: {v5:+.0f} pts  |  30m: {v30:+.0f} pts\n"
+        f"📊 RSI: {rsi_v or 'N/D'}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ No es señal de venta confirmada\n"
+        f"  • Si tienes compra abierta: proteger ganancias\n"
+        f"  • Si buscas entrada: esperar mejor precio\n"
+        f"  • Posible corrección bajista en curso\n"
+        f"⏰ {hora_txt()}"
+    )
+
 def msg_soporte_roto(precio, sop):
     return (
         f"🚨 <b>SOPORTE ROTO — BTC/USD</b>\n"
@@ -395,7 +398,17 @@ def evaluar(precio):
                               v5 or 0, v30 or 0, rsi_v))
         return
 
-    # ── 4. Resumen horario cada 1 hora (solo informativo) ──
+    # ── 4. Alerta retroceso bajista (aviso, no señal de venta) ──
+    # Se activa cuando BTC venia subiendo y empieza a caer
+    # pero aun no cumple todos los criterios de venta
+    if (v30 is not None and v30 > 30 and
+        v5 is not None and v5 < -8 and
+        dir != "venta"):
+        if not peek_cooldown("retroceso_baj"):
+            en_cooldown("retroceso_baj")
+            telegram(msg_retroceso_bajista(precio, v5, v30, rsi_v))
+
+    # ── 5. Resumen horario cada 1 hora (solo informativo) ──
     if not peek_cooldown("resumen"):
         en_cooldown("resumen")
         telegram(msg_resumen(precio, dir, score, v5, v30, rsi_v, len(ps)))
@@ -404,9 +417,9 @@ def evaluar(precio):
 # LOOP PRINCIPAL
 # ══════════════════════════════════════════════════════════
 def main():
-    log("═══ Codigo de Oro BTC Bot v2.0 arrancando ═══")
+    log("═══ Codigo de Oro BTC Bot v3.0 arrancando ═══")
     telegram(
-        "✅ <b>Bot BTC/USD v2.0 activo</b>\n"
+        "✅ <b>Bot BTC/USD v3.0 activo</b>\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "🔍 Monitoreando BTC/USD 24/7\n"
         "📊 Analisis: EMA 9/21/20/50 + RSI + Impulso 5m/30m\n"
@@ -416,6 +429,7 @@ def main():
         "  • COMPRA: lleva bajando + giro al alza confirmado\n"
         "  • VENTA: lleva subiendo + giro a la baja confirmado\n"
         "  • Cooldown 30 min entre señales del mismo tipo\n"
+        "  • 🔶 Alerta retroceso bajista (aviso, no venta)\n"
         "  • Resumen informativo cada 1 hora\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"⏱ Intervalo: cada {INTERVALO}s  |  Buffer: {HIST_MAX} ticks (60 min)"
@@ -433,7 +447,7 @@ def main():
             log("Bot detenido.")
             break
         except Exception as e:
-            log(f"Error inesperado ({type(e).__name__}): {e}")
+            log(f"Error inesperado: {e}")
             time.sleep(30)
 
 if __name__ == "__main__":
