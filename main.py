@@ -1,8 +1,9 @@
 """
 ╔══════════════════════════════════════════════════════════╗
-║       CODIGO DE ORO — Bot BTC/USD v3.0 para Railway     ║
+║       CODIGO DE ORO — Bot BTC/USD v4.0 para Railway     ║
 ║  Filosofia: pocas alertas, todas de calidad             ║
 ║  Solo avisa cuando hay contexto claro de entrada        ║
+║  Fuente: CoinGecko principal | Binance fallback         ║
 ╚══════════════════════════════════════════════════════════╝
 """
 import os
@@ -14,19 +15,18 @@ from datetime import datetime
 # ══════════════════════════════════════════════════════════
 # CONFIGURACION
 # ══════════════════════════════════════════════════════════
-TOKEN     = os.environ.get("TELEGRAM_TOKEN", "8804236118:AAEsOWK0sk8ZAcUTXAD8ZYWiMm5OGPn07Xs")
-CHAT_IDS  = [c.strip() for c in os.environ.get("CHAT_ID", "1842727203,5545360383").split(",") if c.strip()]
-INTERVALO = 5       # segundos entre ticks
-HIST_MAX  = 720     # 720 x 5s = 60 minutos de historial
+TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_IDS = [c.strip() for c in os.environ.get("CHAT_ID", "1842727203,5545360383").split(",") if c.strip()]
+INTERVALO = 5      # segundos entre ticks
+HIST_MAX  = 720    # 720 x 5s = 60 minutos de historial
 
 # Cooldowns — tiempo minimo entre alertas del mismo tipo
 CD = {
-    "entrada_compra":  1800,   # 30 min entre señales de compra
-    "entrada_venta":   1800,   # 30 min entre señales de venta
-    "retroceso_baj":    900,   # 15 min entre alertas de retroceso
-    "soporte_roto":     600,   # 10 min
-    "rebote_soporte":   600,
-    "resumen":         3600,   # resumen cada 1 hora (solo informativo)
+    "entrada_compra": 1800,   # 30 min entre señales de compra
+    "entrada_venta":  1800,   # 30 min entre señales de venta
+    "soporte_roto":    600,   # 10 min
+    "rebote_soporte":  600,
+    "resumen":        3600,   # resumen cada 1 hora (informativo)
 }
 
 # ══════════════════════════════════════════════════════════
@@ -35,11 +35,6 @@ CD = {
 historial = deque(maxlen=HIST_MAX)
 cooldowns = {}
 soporte   = float(os.environ.get("SOPORTE_BTC", "0"))
-
-# Estado de tendencia — para detectar cuando lleva bajando y da vuelta
-_tendencia_previa    = "neutral"   # "alc", "baj", "neutral"
-_precio_tendencia    = 0.0         # precio cuando inicio la tendencia actual
-_contador_tendencia  = 0           # cuantos ticks consecutivos confirman la tendencia
 
 # ══════════════════════════════════════════════════════════
 # HELPERS
@@ -65,6 +60,9 @@ def peek_cooldown(id_cd):
     return id_cd in cooldowns and ahora - cooldowns[id_cd] < cd_seg
 
 def telegram(msg):
+    if not TOKEN:
+        log("ERROR: TELEGRAM_TOKEN no definido — mensaje no enviado")
+        return
     for cid in CHAT_IDS:
         try:
             r = requests.post(
@@ -75,14 +73,27 @@ def telegram(msg):
             if r.status_code == 200:
                 log(f"TG OK -> {cid}: {msg[:50].strip()}")
             else:
-                log(f"TG error {r.status_code} -> {cid}")
+                log(f"TG error {r.status_code} -> {cid}: {r.text[:100]}")
         except Exception as e:
-            log(f"TG excepcion -> {cid}: {e}")
+            log(f"TG excepcion ({type(e).__name__}) -> {cid}: {e}")
 
 # ══════════════════════════════════════════════════════════
-# FETCH PRECIO — Binance gratis
+# FETCH PRECIO — CoinGecko principal, Binance fallback
 # ══════════════════════════════════════════════════════════
 def get_precio():
+    # Fuente 1: CoinGecko (sin restricciones geograficas)
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+            timeout=10
+        )
+        data = r.json()
+        precio = float(data["bitcoin"]["usd"])
+        return precio
+    except Exception as e:
+        log(f"CoinGecko error ({type(e).__name__}): {e} — intentando Binance...")
+
+    # Fuente 2: Binance como fallback
     try:
         r = requests.get(
             "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
@@ -91,9 +102,10 @@ def get_precio():
         data = r.json()
         if "price" in data:
             return float(data["price"])
+        log(f"Binance respuesta inesperada: {data}")
         return None
     except Exception as e:
-        log(f"Binance error: {e}")
+        log(f"Binance error ({type(e).__name__}): {e}")
         return None
 
 def registrar(precio):
@@ -174,15 +186,12 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
     if v5 is None or v30 is None:
         return "esperar", 0, [], 0, 0, 0
 
-    razones_c = []   # razones a favor de compra
-    razones_v = []   # razones a favor de venta
+    razones_c = []
+    razones_v = []
     score_c   = 0
     score_v   = 0
 
     # ── CONTEXTO: lleva bajando / subiendo en 30 min ──
-    # Este es el filtro mas importante: solo buscamos compra
-    # cuando el precio lleva un rato bajando (posible suelo)
-    # y solo buscamos venta cuando lleva subiendo (posible techo)
     if v30 < -30:
         score_c += 30
         razones_c.append(f"Lleva bajando {v30:+.0f} pts en 30m — posible suelo")
@@ -190,20 +199,16 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
         score_v += 30
         razones_v.append(f"Lleva subiendo {v30:+.0f} pts en 30m — posible techo")
     else:
-        # Sin tendencia clara en 30m — no hay contexto de entrada
         return "esperar", 0, [], 0, 0, 0
 
     # ── CAMBIO DE DIRECCION en 5 min ──
-    # Para compra: v30 negativo pero v5 ya positivo (giro al alza)
-    # Para venta:  v30 positivo pero v5 ya negativo (giro a la baja)
     if v5 > 10:
         score_c += 25
         razones_c.append(f"Giro alcista en 5m: +{v5:.0f} pts")
-    elif v5 < -8:  # CAMBIO v3: mas sensible para detectar giros bajistas
+    elif v5 < -10:
         score_v += 25
         razones_v.append(f"Giro bajista en 5m: {v5:.0f} pts")
     else:
-        # Sin giro confirmado — no hay entrada todavia
         return "esperar", 0, [], 0, 0, 0
 
     # ── EMA9 vs EMA21 ──
@@ -212,7 +217,6 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
         score_c += 20
         razones_c.append(f"EMA9 sobre EMA21 (+{diff_ema:.0f}) ✅")
     elif diff_ema > -100:
-        # Muy cerca del cruce — señal de cambio inminente
         score_c += 10
         razones_c.append(f"EMA9 acercandose a EMA21 ({diff_ema:.0f}) — cruce proximo")
     else:
@@ -243,10 +247,6 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
             razones_v.append(f"RSI {rsi_v} — zona neutra/bajista ✅")
 
     # ── DECISION FINAL ──
-    # Se necesita score >= 70 para generar señal
-    # Ademas el contexto debe ser coherente:
-    # compra requiere v30 negativo + v5 positivo
-    # venta requiere v30 positivo + v5 negativo
     coherente_compra = v30 < 0 and v5 > 0
     coherente_venta  = v30 > 0 and v5 < 0
 
@@ -272,15 +272,14 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
 # MENSAJES
 # ══════════════════════════════════════════════════════════
 def msg_entrada(dir, precio, score, razones, sl, tp, rr, v5, v30, rsi_v):
-    sl_pts = abs(precio - sl)
-    tp_pts = abs(tp - precio)
-    # XM: 0.01 Token BTC = $0.10 por punto
-    sl_usd = round(sl_pts * 0.10, 2)
-    tp_usd = round(tp_pts * 0.10, 2)
-    emoji  = "🟢" if dir == "compra" else "🔴"
-    titulo = "ENTRADA COMPRA" if dir == "compra" else "ENTRADA VENTA"
-    dir_v5 = f"+{v5:.0f}" if v5 >= 0 else f"{v5:.0f}"
-    dir_v30= f"+{v30:.0f}" if v30 >= 0 else f"{v30:.0f}"
+    sl_pts  = abs(precio - sl)
+    tp_pts  = abs(tp - precio)
+    sl_usd  = round(sl_pts * 0.10, 2)
+    tp_usd  = round(tp_pts * 0.10, 2)
+    emoji   = "🟢" if dir == "compra" else "🔴"
+    titulo  = "ENTRADA COMPRA" if dir == "compra" else "ENTRADA VENTA"
+    dir_v5  = f"+{v5:.0f}" if v5 >= 0 else f"{v5:.0f}"
+    dir_v30 = f"+{v30:.0f}" if v30 >= 0 else f"{v30:.0f}"
     calidad = "🔥 Muy alta" if score >= 85 else "✅ Alta" if score >= 75 else "👍 Buena"
     return (
         f"{emoji} <b>{titulo} — BTC/USD</b>\n"
@@ -298,22 +297,6 @@ def msg_entrada(dir, precio, score, razones, sl, tp, rr, v5, v30, rsi_v):
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📶 Calidad: <b>{calidad}</b>\n"
         f"⏰ {hora_txt()} — Revisar vela actual antes de entrar"
-    )
-
-def msg_retroceso_bajista(precio, v5, v30, rsi_v):
-    """Alerta intermedia: aviso de correccion, no señal de venta."""
-    return (
-        f"🔶 <b>POSIBLE RETROCESO — BTC/USD</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Precio: <b>${precio:,.0f}</b>\n"
-        f"⏱ 5m: {v5:+.0f} pts  |  30m: {v30:+.0f} pts\n"
-        f"📊 RSI: {rsi_v or 'N/D'}\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚠️ No es señal de venta confirmada\n"
-        f"  • Si tienes compra abierta: proteger ganancias\n"
-        f"  • Si buscas entrada: esperar mejor precio\n"
-        f"  • Posible corrección bajista en curso\n"
-        f"⏰ {hora_txt()}"
     )
 
 def msg_soporte_roto(precio, sop):
@@ -363,7 +346,6 @@ def evaluar(precio):
     v30_txt = f"{v30:+.0f}" if v30 is not None else "N/D"
     log(f"BTC=${precio:,.0f}  v5={v5_txt}  v30={v30_txt}  RSI={rsi_v}  hist={len(ps)}")
 
-    # Necesitamos al menos 5 minutos de datos para v5 y EMAs
     if len(ps) < 60:
         log(f"Acumulando datos: {len(ps)}/60")
         return
@@ -374,8 +356,8 @@ def evaluar(precio):
             telegram(msg_soporte_roto(precio, soporte))
         return
 
-    # ── 2. Rebote desde soporte (aviso previo sin ser señal completa) ──
-    if soporte > 0 and precio >= soporte and precio <= soporte + 30:
+    # ── 2. Rebote desde soporte ──
+    if soporte > 0 and soporte <= precio <= soporte + 30:
         if v5 is not None and v5 > 20:
             if not en_cooldown("rebote_soporte"):
                 telegram(msg_rebote_soporte(precio, soporte, v5))
@@ -387,7 +369,7 @@ def evaluar(precio):
     log(f"Analisis: {dir} | score={score}")
 
     if dir == "compra" and not peek_cooldown("entrada_compra"):
-        en_cooldown("entrada_compra")   # activar cooldown
+        en_cooldown("entrada_compra")
         telegram(msg_entrada("compra", precio, score, razones, sl, tp, rr,
                               v5 or 0, v30 or 0, rsi_v))
         return
@@ -398,17 +380,7 @@ def evaluar(precio):
                               v5 or 0, v30 or 0, rsi_v))
         return
 
-    # ── 4. Alerta retroceso bajista (aviso, no señal de venta) ──
-    # Se activa cuando BTC venia subiendo y empieza a caer
-    # pero aun no cumple todos los criterios de venta
-    if (v30 is not None and v30 > 30 and
-        v5 is not None and v5 < -8 and
-        dir != "venta"):
-        if not peek_cooldown("retroceso_baj"):
-            en_cooldown("retroceso_baj")
-            telegram(msg_retroceso_bajista(precio, v5, v30, rsi_v))
-
-    # ── 5. Resumen horario cada 1 hora (solo informativo) ──
+    # ── 4. Resumen horario ──
     if not peek_cooldown("resumen"):
         en_cooldown("resumen")
         telegram(msg_resumen(precio, dir, score, v5, v30, rsi_v, len(ps)))
@@ -417,11 +389,12 @@ def evaluar(precio):
 # LOOP PRINCIPAL
 # ══════════════════════════════════════════════════════════
 def main():
-    log("═══ Codigo de Oro BTC Bot v3.0 arrancando ═══")
+    log("═══ Codigo de Oro BTC Bot v4.0 arrancando ═══")
     telegram(
-        "✅ <b>Bot BTC/USD v3.0 activo</b>\n"
+        "✅ <b>Bot BTC/USD v4.0 activo</b>\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "🔍 Monitoreando BTC/USD 24/7\n"
+        "📡 Fuente: CoinGecko (fallback: Binance)\n"
         "📊 Analisis: EMA 9/21/20/50 + RSI + Impulso 5m/30m\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "📌 <b>Logica de señal:</b>\n"
@@ -429,7 +402,6 @@ def main():
         "  • COMPRA: lleva bajando + giro al alza confirmado\n"
         "  • VENTA: lleva subiendo + giro a la baja confirmado\n"
         "  • Cooldown 30 min entre señales del mismo tipo\n"
-        "  • 🔶 Alerta retroceso bajista (aviso, no venta)\n"
         "  • Resumen informativo cada 1 hora\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"⏱ Intervalo: cada {INTERVALO}s  |  Buffer: {HIST_MAX} ticks (60 min)"
@@ -447,7 +419,7 @@ def main():
             log("Bot detenido.")
             break
         except Exception as e:
-            log(f"Error inesperado: {e}")
+            log(f"Error inesperado ({type(e).__name__}): {e}")
             time.sleep(30)
 
 if __name__ == "__main__":
