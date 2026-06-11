@@ -1,9 +1,9 @@
 """
 ╔══════════════════════════════════════════════════════════╗
-║       CODIGO DE ORO — Bot BTC/USD v4.0 para Railway     ║
+║       CODIGO DE ORO — Bot BTC/USD v5.0 para Railway     ║
 ║  Filosofia: pocas alertas, todas de calidad             ║
 ║  Solo avisa cuando hay contexto claro de entrada        ║
-║  Fuente: CoinGecko principal | Binance fallback         ║
+║  Fuente: Kraken principal | CoinGecko fallback          ║
 ╚══════════════════════════════════════════════════════════╝
 """
 import os
@@ -15,10 +15,10 @@ from datetime import datetime
 # ══════════════════════════════════════════════════════════
 # CONFIGURACION
 # ══════════════════════════════════════════════════════════
-TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_IDS = [c.strip() for c in os.environ.get("CHAT_ID", "1842727203,5545360383").split(",") if c.strip()]
-INTERVALO = 5      # segundos entre ticks
-HIST_MAX  = 720    # 720 x 5s = 60 minutos de historial
+TOKEN     = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_IDS  = [c.strip() for c in os.environ.get("CHAT_ID", "1842727203,5545360383").split(",") if c.strip()]
+INTERVALO = 15     # segundos entre ticks (15s evita rate limit en CoinGecko)
+HIST_MAX  = 240    # 240 x 15s = 60 minutos de historial
 
 # Cooldowns — tiempo minimo entre alertas del mismo tipo
 CD = {
@@ -78,10 +78,25 @@ def telegram(msg):
             log(f"TG excepcion ({type(e).__name__}) -> {cid}: {e}")
 
 # ══════════════════════════════════════════════════════════
-# FETCH PRECIO — CoinGecko principal, Binance fallback
+# FETCH PRECIO — Kraken principal, CoinGecko fallback
 # ══════════════════════════════════════════════════════════
-def get_precio():
-    # Fuente 1: CoinGecko (sin restricciones geograficas)
+def get_precio_kraken():
+    try:
+        r = requests.get(
+            "https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
+            timeout=10
+        )
+        data = r.json()
+        if data.get("error"):
+            log(f"Kraken error en respuesta: {data['error']}")
+            return None
+        precio = float(data["result"]["XXBTZUSD"]["c"][0])
+        return precio
+    except Exception as e:
+        log(f"Kraken error ({type(e).__name__}): {e} — intentando CoinGecko...")
+        return None
+
+def get_precio_coingecko():
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
@@ -91,22 +106,15 @@ def get_precio():
         precio = float(data["bitcoin"]["usd"])
         return precio
     except Exception as e:
-        log(f"CoinGecko error ({type(e).__name__}): {e} — intentando Binance...")
+        log(f"CoinGecko error ({type(e).__name__}): {e}")
+        return None
 
-    # Fuente 2: Binance como fallback
-    try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-            timeout=10
-        )
-        data = r.json()
-        if "price" in data:
-            return float(data["price"])
-        log(f"Binance respuesta inesperada: {data}")
-        return None
-    except Exception as e:
-        log(f"Binance error ({type(e).__name__}): {e}")
-        return None
+def get_precio():
+    precio = get_precio_kraken()
+    if precio:
+        return precio
+    log("Kraken falló — intentando CoinGecko (fallback)...")
+    return get_precio_coingecko()
 
 def registrar(precio):
     if not precio or precio < 10000 or precio > 1000000:
@@ -177,10 +185,6 @@ def get_velocidad(minutos):
 #   5. EMA20 < EMA50 O el precio cayo desde resistencia
 # ══════════════════════════════════════════════════════════
 def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
-    """
-    Retorna: ("compra"|"venta"|"esperar", score 0-100, lista razones, sl, tp, rr)
-    Solo retorna compra/venta cuando el contexto completo esta alineado.
-    """
     if e9 is None or e21 is None or e20 is None or e50 is None:
         return "esperar", 0, [], 0, 0, 0
     if v5 is None or v30 is None:
@@ -346,8 +350,9 @@ def evaluar(precio):
     v30_txt = f"{v30:+.0f}" if v30 is not None else "N/D"
     log(f"BTC=${precio:,.0f}  v5={v5_txt}  v30={v30_txt}  RSI={rsi_v}  hist={len(ps)}")
 
-    if len(ps) < 60:
-        log(f"Acumulando datos: {len(ps)}/60")
+    # Necesitamos al menos 20 ticks (5 min a 15s) para v5 y EMAs
+    if len(ps) < 20:
+        log(f"Acumulando datos: {len(ps)}/20")
         return
 
     # ── 1. Soporte roto ──
@@ -389,12 +394,12 @@ def evaluar(precio):
 # LOOP PRINCIPAL
 # ══════════════════════════════════════════════════════════
 def main():
-    log("═══ Codigo de Oro BTC Bot v4.0 arrancando ═══")
+    log("═══ Codigo de Oro BTC Bot v5.0 arrancando ═══")
     telegram(
-        "✅ <b>Bot BTC/USD v4.0 activo</b>\n"
+        "✅ <b>Bot BTC/USD v5.0 activo</b>\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "🔍 Monitoreando BTC/USD 24/7\n"
-        "📡 Fuente: CoinGecko (fallback: Binance)\n"
+        "📡 Fuente: Kraken (fallback: CoinGecko)\n"
         "📊 Analisis: EMA 9/21/20/50 + RSI + Impulso 5m/30m\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "📌 <b>Logica de señal:</b>\n"
