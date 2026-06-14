@@ -1,10 +1,17 @@
 """
-╔══════════════════════════════════════════════════════════╗
-║       CODIGO DE ORO — Bot BTC/USD v5.0 para Railway     ║
-║  Filosofia: pocas alertas, todas de calidad             ║
-║  Solo avisa cuando hay contexto claro de entrada        ║
-║  Fuente: Kraken principal | CoinGecko fallback          ║
-╚══════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════╗
+║         BOT DE BTC — CODIGO DE ORO BTC/USD v6.0             ║
+║         Railway deployment | 24/7 monitoring                ║
+║         Fuente: Kraken principal | CoinGecko fallback       ║
+║                                                              ║
+║  NUEVO en v6.0 — Filtros anti-senal-falsa:                  ║
+║  • Umbral v30 compra:  < -30  →  < -50  (mas estricto)      ║
+║  • Umbral v30 venta:   > +30  →  > +50  (mas estricto)      ║
+║  • Score minimo: 65 → 70                                     ║
+║  • Filtro 30m duro: si v30 entre -50 y +50 → esperar        ║
+║    Evita entrar en pullbacks dentro de tendencia contraria   ║
+║    Caso real bloqueado: v30=-41 + v5=+29 = senal FALSA      ║
+╚══════════════════════════════════════════════════════════════╝
 """
 import os
 import time
@@ -195,15 +202,23 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
     score_c   = 0
     score_v   = 0
 
+    # ── FILTRO 30m DURO (v6.0) ──────────────────────────────────────
+    # Si el 30m no muestra tendencia fuerte (>= -50 o <= +50),
+    # bloqueamos la senal completamente. Esto elimina las entradas
+    # en pullbacks temporales dentro de una tendencia contraria.
+    # Caso real: v30=-41 parecia suelo pero la tendencia seguia
+    # bajista → senal falsa de COMPRA → ahora BLOQUEADA.
+    # ─────────────────────────────────────────────────────────────────
+    if v30 >= -50 and v30 <= 50:
+        return "esperar", 0, [], 0, 0, 0
+
     # ── CONTEXTO: lleva bajando / subiendo en 30 min ──
-    if v30 < -30:
+    if v30 < -50:
         score_c += 30
         razones_c.append(f"Lleva bajando {v30:+.0f} pts en 30m — posible suelo")
-    elif v30 > 30:
+    elif v30 > 50:
         score_v += 30
         razones_v.append(f"Lleva subiendo {v30:+.0f} pts en 30m — posible techo")
-    else:
-        return "esperar", 0, [], 0, 0, 0
 
     # ── CAMBIO DE DIRECCION en 5 min ──
     if v5 > 10:
@@ -254,7 +269,7 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
     coherente_compra = v30 < 0 and v5 > 0
     coherente_venta  = v30 > 0 and v5 < 0
 
-    if coherente_compra and score_c >= 65 and (rsi_v is None or rsi_v < 70):
+    if coherente_compra and score_c >= 70 and (rsi_v is None or rsi_v < 70):
         sl_base = max(80, round(abs(v5) * 1.5, 0))
         rr      = 2.0 if score_c >= 80 else 1.5
         entrada = round(precio + 5, 0)
@@ -262,7 +277,7 @@ def analizar(precio, v5, v30, e9, e21, e20, e50, rsi_v):
         tp      = round(entrada + sl_base * rr, 0)
         return "compra", score_c, razones_c, sl, tp, rr
 
-    if coherente_venta and score_v >= 65 and (rsi_v is None or rsi_v > 30):
+    if coherente_venta and score_v >= 70 and (rsi_v is None or rsi_v > 30):
         sl_base = max(80, round(abs(v5) * 1.5, 0))
         rr      = 2.0 if score_v >= 80 else 1.5
         entrada = round(precio - 5, 0)
@@ -394,18 +409,20 @@ def evaluar(precio):
 # LOOP PRINCIPAL
 # ══════════════════════════════════════════════════════════
 def main():
-    log("═══ Codigo de Oro BTC Bot v5.0 arrancando ═══")
+    log("═══ Bot de BTC — Codigo de Oro v6.0 arrancando ═══")
     telegram(
-        "✅ <b>Bot BTC/USD v5.0 activo</b>\n"
+        "✅ <b>Bot de BTC — BTC/USD v6.0 activo</b>\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "🔍 Monitoreando BTC/USD 24/7\n"
         "📡 Fuente: Kraken (fallback: CoinGecko)\n"
         "📊 Analisis: EMA 9/21/20/50 + RSI + Impulso 5m/30m\n"
         "━━━━━━━━━━━━━━━━━━━\n"
-        "📌 <b>Logica de señal:</b>\n"
+        "📌 <b>Logica de señal v6.0:</b>\n"
         "  • Solo avisa cuando hay contexto real\n"
         "  • COMPRA: lleva bajando + giro al alza confirmado\n"
         "  • VENTA: lleva subiendo + giro a la baja confirmado\n"
+        "  • 🆕 Filtro 30m duro: necesita > 50 pts de movimiento\n"
+        "  • 🆕 Score minimo subio de 65 → 70\n"
         "  • Cooldown 30 min entre señales del mismo tipo\n"
         "  • Resumen informativo cada 1 hora\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
